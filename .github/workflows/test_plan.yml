@@ -1,0 +1,76 @@
+name: Plan Test
+
+# Plan-only regression check for the provider schema.
+#
+# Builds the provider from THIS pull request, points Terraform at that binary via
+# dev_overrides, and runs `terraform test` with `command = plan` against the
+# fixtures in testing/.
+#
+# No New Relic credentials are used and no resources are created: a plan on a
+# create-only resource never reaches the API. The key below is deliberately fake.
+#
+# Catches the class of breakage no contract gate or compiler can see -- an
+# attribute disappearing from a resource schema. The provider still compiles;
+# customer configuration stops working with "Unsupported argument".
+#
+# Deliberately excluded (verified to require live credentials during plan):
+#   - all data sources, which read from the API during plan
+#   - newrelic_fleet, whose CustomizeDiff calls the API
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan-test:
+    name: Plan Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+
+      - name: Build provider from this PR
+        run: make compile-only
+
+      - name: Point Terraform at the PR build
+        # The committed testing/dev.tfrc hardcodes bin/darwin for local Mac use.
+        # CI builds to bin/linux, so the job writes its own override file rather
+        # than editing dev.tfrc, which humans rely on.
+        run: |
+          cat > testing/ci.tfrc <<EOF
+          provider_installation {
+            dev_overrides { "newrelic/newrelic" = "${GITHUB_WORKSPACE}/bin/linux" }
+            direct {}
+          }
+          EOF
+
+      - name: Run plan tests
+        working-directory: testing
+        env:
+          TF_CLI_CONFIG_FILE: ci.tfrc
+          # Fake on purpose. A create-only plan never calls the API, so any real
+          # value here would be both unnecessary and a needless secret exposure
+          # on a machine-authored branch.
+          NEW_RELIC_API_KEY: NRAK-PLANONLY-NOTAREALKEY
+          NEW_RELIC_ACCOUNT_ID: "1234567"
+          NEW_RELIC_REGION: US
+        run: |
+          terraform init -input=false
+          terraform test
